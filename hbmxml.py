@@ -8,7 +8,8 @@ import json
 from threading import Thread
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QLabel, 
                             QLineEdit, QPushButton, QListWidget, QProgressBar, QFileDialog, 
-                            QMessageBox, QSizePolicy, QGroupBox, QFrame, QComboBox, QTextEdit)
+                            QMessageBox, QSizePolicy, QGroupBox, QFrame, QComboBox, QTextEdit,
+                            QSlider, QSpinBox)
 from PyQt5.QtCore import Qt, pyqtSignal, QObject, QSettings, QTimer
 from PyQt5.QtGui import QPixmap, QIcon, QFont, QColor, QPalette
 import webbrowser
@@ -16,6 +17,7 @@ import pyautogui
 import pygetwindow as gw
 import pandas as pd
 from openpyxl import Workbook
+
 
 # Configuração de logging
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -40,13 +42,31 @@ class WorkerSignals(QObject):
     top_progress = pyqtSignal(int, int)  # current, total
 
 class NFeDownloader(Thread):
-    def __init__(self, nfe_keys, settings, mode='record'):
+    def __init__(self, nfe_keys, settings, mode='record', speed=3):
         super().__init__()
         self.nfe_keys = nfe_keys
         self.settings = settings
         self.mode = mode  # 'record' or 'auto'
+        self.speed = max(1, min(5, speed))  # Garante valor entre 1 e 5
         self.signals = WorkerSignals()
         self._is_running = True
+        self.current_step = 0
+        self.positions = {}
+        
+        # Tempos de espera base (para velocidade 3) e ajustados pela velocidade
+        self.base_wait_times = {
+            'browser_open': 5,
+            'step_wait': 1,
+            'captcha': 3,
+            'continue': 5,
+            'download': 3,
+            'popup': 2,
+            'new_query': 3,
+            'between_nfe': 2
+        }
+        self.wait_times = self.calculate_wait_times()
+        
+        # Passos do processo
         self.steps = {
             1: "Selecione o local para inserir a chave da NFe",
             2: "Selecione o campo do captcha",
@@ -56,8 +76,12 @@ class NFeDownloader(Thread):
             6: "Clique no botão Nova Consulta",
             7: "Aguardando próxima NFe"
         }
-        self.current_step = 0
-        self.positions = {}
+
+    def calculate_wait_times(self):
+        """Calcula os tempos de espera com base na velocidade selecionada"""
+        # Velocidade 3 = tempos base, 1 = mais lento, 5 = mais rápido
+        factor = {1: 2.0, 2: 1.5, 3: 1.0, 4: 0.75, 5: 0.5}[self.speed]
+        return {k: v * factor for k, v in self.base_wait_times.items()}
 
     def stop(self):
         self._is_running = False
@@ -74,7 +98,7 @@ class NFeDownloader(Thread):
             self.signals.browser_ready.emit()
             
             # Aguarda um pouco para o navegador abrir
-            time.sleep(5)
+            time.sleep(self.wait_times['browser_open'])
             logger.info("Navegador aberto, aguardando gravação de posições")
             
             # Para cada passo, aguarda o usuário clicar e grava a posição
@@ -97,6 +121,10 @@ class NFeDownloader(Thread):
                     self.settings.setValue(f"step_{step}_x", pos[0])
                     self.settings.setValue(f"step_{step}_y", pos[1])
                     logger.info(f"Posição {step} salva: {pos}")
+                
+                # Salva também a pasta de download se estiver configurada
+                if hasattr(self, 'download_folder'):
+                    self.settings.setValue("download_folder", self.download_folder)
                 
                 self.signals.message.emit("Posições gravadas com sucesso!")
                 logger.info("Todas as posições foram gravadas com sucesso")
@@ -125,7 +153,7 @@ class NFeDownloader(Thread):
             
             # Carrega as posições salvas
             positions = {}
-            for step in range(1, 8):  # Agora temos 7 passos
+            for step in range(1, 8):  # Temos 7 passos
                 x = self.settings.value(f"step_{step}_x", None)
                 y = self.settings.value(f"step_{step}_y", None)
                 if x is None or y is None:
@@ -136,10 +164,14 @@ class NFeDownloader(Thread):
                 positions[step] = (int(x), int(y))
                 logger.debug(f"Posição {step} carregada: {positions[step]}")
             
+            # Carrega a pasta de download salva
+            self.download_folder = self.settings.value("download_folder", os.path.expanduser("~\\Downloads"))
+            logger.info(f"Pasta de download definida como: {self.download_folder}")
+            
             # Abre o navegador apenas uma vez
             webbrowser.open("https://www.nfe.fazenda.gov.br/portal/consultaRecaptcha.aspx?tipoConsulta=resumo&tipoConteudo=7PhJ+gAVw2g=")
             self.signals.browser_ready.emit()
-            time.sleep(5)
+            time.sleep(self.wait_times['browser_open'])
             
             for i, nfe_key in enumerate(self.nfe_keys):
                 if not self._is_running:
@@ -153,44 +185,44 @@ class NFeDownloader(Thread):
                     # Passo 1: Clica no campo da chave NFe
                     self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Inserindo chave...")
                     pyautogui.click(positions[1][0], positions[1][1])
-                    time.sleep(1)
+                    time.sleep(self.wait_times['step_wait'])
                     pyautogui.hotkey('ctrl', 'a')  # Seleciona tudo para substituir
                     pyautogui.write(nfe_key)
-                    time.sleep(1)
+                    time.sleep(self.wait_times['step_wait'])
                     logger.debug(f"Chave {nfe_key} inserida")
                     
                     # Passo 2: Clica no campo do captcha
                     self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Aguardando captcha...")
                     pyautogui.click(positions[2][0], positions[2][1])
-                    time.sleep(3)  # Tempo para resolver o captcha manualmente
+                    time.sleep(self.wait_times['captcha'])  # Tempo para resolver o captcha manualmente
                     logger.debug("Campo captcha clicado, aguardando resolução")
                     
                     # Passo 3: Clica em Continuar
                     self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Continuando...")
                     pyautogui.click(positions[3][0], positions[3][1])
-                    time.sleep(5)
+                    time.sleep(self.wait_times['continue'])
                     logger.debug("Botão Continuar clicado")
                     
                     # Passo 4: Clica em Download do Documento
                     self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Baixando XML...")
                     pyautogui.click(positions[4][0], positions[4][1])
-                    time.sleep(3)
+                    time.sleep(self.wait_times['download'])
                     logger.debug("Botão Download clicado")
                     
                     # Passo 5: Clica no OK do popup
                     self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Confirmando...")
                     pyautogui.click(positions[5][0], positions[5][1])
-                    time.sleep(2)
+                    time.sleep(self.wait_times['popup'])
                     logger.debug("Popup OK clicado")
                     
                     # Passo 6: Clica em Nova Consulta
                     self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Preparando próxima...")
                     pyautogui.click(positions[6][0], positions[6][1])
-                    time.sleep(3)
+                    time.sleep(self.wait_times['new_query'])
                     logger.debug("Botão Nova Consulta clicado")
                     
                     # Passo 7: Aguarda um pouco antes da próxima NFe
-                    time.sleep(2)
+                    time.sleep(self.wait_times['between_nfe'])
                     
                     self.signals.progress.emit(int((i+1)/total * 100))
                     
@@ -236,7 +268,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("HBM XML - Download Automático de NFe")
-        self.setFixedSize(900, 750)
+        self.setFixedSize(900, 800)  # Aumentado para acomodar novos controles
         
         # Configura ícone
         if os.path.exists("data/icon.ico"):
@@ -251,6 +283,10 @@ class MainWindow(QMainWindow):
         self.recording = False
         self.current_nfe = 0
         self.total_nfes = 0
+        self.download_folder = self.settings.value("download_folder", os.path.expanduser("~\\Downloads"))
+        self.speed = int(self.settings.value("speed", 3))  # Valor padrão 3 (médio)
+        self.overlay = OverlayWindow()
+        self.overlay.resize(250, 120)  # Tamanho inicial
         
         # Layout principal
         self.init_ui()
@@ -354,6 +390,22 @@ class MainWindow(QMainWindow):
             #top-progress::chunk {
                 background-color: #87CEFA;
             }
+            QSlider::groove:horizontal {
+                height: 8px;
+                background: #ddd;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                width: 18px;
+                height: 18px;
+                margin: -5px 0;
+                background: #4682B4;
+                border-radius: 9px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #87CEFA;
+                border-radius: 4px;
+            }
         """)
     
     def init_ui(self):
@@ -385,6 +437,9 @@ class MainWindow(QMainWindow):
         # Corpo principal
         body_layout = QVBoxLayout()
         body_layout.setContentsMargins(20, 10, 20, 10)
+        
+        # Seção de configurações
+        self.setup_config_section(body_layout)
         
         # Seção de entrada de NFe
         self.setup_nfe_section(body_layout)
@@ -438,10 +493,52 @@ class MainWindow(QMainWindow):
         
         title_layout.addWidget(title_label)
         title_layout.addWidget(subtitle_label)
+        
+        # Adiciona um link clicável simples
+        info_link = QLabel("<a href='#' style='color: #4682B4; text-decoration: none;'>(i) Informações</a>")
+        info_link.setOpenExternalLinks(False)
+        info_link.linkActivated.connect(lambda: QMessageBox.information(
+            self, 
+            "Informações", 
+            "Desenvolvido por Kevym Luccas da Controlaria\n\nPara suporte entre em contato via Messenger"
+        ))
+        info_link.setToolTip("Clique para mais informações")
+        info_link.setAlignment(Qt.AlignRight)
+
+        # Layout para alinhar à direita
+        info_layout = QHBoxLayout()
+        info_layout.addStretch()
+        info_layout.addWidget(info_link)
+        title_layout.addLayout(info_layout)
+        
         title_layout.addStretch()
         header_layout.addLayout(title_layout)
         
         main_layout.addWidget(header)
+    
+    def setup_config_section(self, body_layout):
+        config_group = QGroupBox("Configurações")
+        config_layout = QVBoxLayout()
+        
+        # Controle de velocidade
+        speed_layout = QHBoxLayout()
+        speed_layout.addWidget(QLabel("Velocidade:"))
+        
+        self.speed_slider = QSlider(Qt.Horizontal)
+        self.speed_slider.setRange(1, 5)
+        self.speed_slider.setValue(self.speed)
+        self.speed_slider.setTickPosition(QSlider.TicksBelow)
+        self.speed_slider.setTickInterval(1)
+        self.speed_slider.valueChanged.connect(self.update_speed)
+        speed_layout.addWidget(self.speed_slider)
+        
+        self.speed_label = QLabel(f"")
+        self.speed_label.setStyleSheet("font-size: 11px;")
+        speed_layout.addWidget(self.speed_label)
+        config_layout.addLayout(speed_layout)
+        
+        config_group.setLayout(config_layout)
+        body_layout.addWidget(config_group)
     
     def setup_nfe_section(self, body_layout):
         nfe_group = QGroupBox("Adicionar NFe")
@@ -483,7 +580,7 @@ class MainWindow(QMainWindow):
         nfe_group.setLayout(nfe_layout)
         body_layout.addWidget(nfe_group)
     
-    def setup_feedback_section(self, body_layout):
+    def setup_feedback_section(self, left_panel):
         feedback_group = QGroupBox("Andamento do Processo")
         feedback_layout = QVBoxLayout()
         
@@ -521,7 +618,7 @@ class MainWindow(QMainWindow):
         self.update_config_status()
         
         feedback_group.setLayout(feedback_layout)
-        body_layout.addWidget(feedback_group)
+        left_panel.addWidget(feedback_group)
     
     def setup_log_section(self, body_layout):
         log_group = QGroupBox("Log de Execução")
@@ -579,7 +676,7 @@ class MainWindow(QMainWindow):
     
     def update_config_status(self):
         """Atualiza o status da configuração na interface"""
-        has_config = all(self.settings.value(f"step_{i}_x") is not None for i in range(1, 8))  # Agora 7 passos
+        has_config = all(self.settings.value(f"step_{i}_x") is not None for i in range(1, 8))  # 7 passos
         
         if has_config:
             self.config_status.setText("✔ Configurações de automação prontas")
@@ -587,6 +684,13 @@ class MainWindow(QMainWindow):
         else:
             self.config_status.setText("⚠ Primeiro uso requer configuração")
             self.config_status.setStyleSheet("color: #e74c3c; font-weight: bold;")
+    
+    def update_speed(self, value):
+        """Atualiza a velocidade de execução"""
+        self.speed = value
+        self.speed_label.setText(f"")
+        self.settings.setValue("speed", value)
+        logger.info(f"Velocidade ajustada para: {value}")
     
     def add_nfe(self):
         key = self.key_input.text().strip()
@@ -696,7 +800,13 @@ class MainWindow(QMainWindow):
             pos = pyautogui.position()
             self.worker.positions[self.worker.current_step] = pos
             self.status_label.setText(f"Posição {self.worker.current_step} gravada: {pos}")
-    
+
+    def update_overlay(self, current, total, status):
+        """Atualiza a janela de overlay com o progresso atual"""
+        if not self.overlay.isVisible():
+            self.overlay.show()
+        self.overlay.update_progress(current, total, status)
+
     def check_clicks(self):
         """Verifica cliques durante a gravação"""
         if self.recording and self.worker and self.worker.current_step > 0:
@@ -707,7 +817,7 @@ class MainWindow(QMainWindow):
         """Inicia o processo de download"""
         try:
             # Verifica se já tem configurações salvas
-            has_config = all(self.settings.value(f"step_{i}_x") is not None for i in range(1, 8))  # Agora 7 passos
+            has_config = all(self.settings.value(f"step_{i}_x") is not None for i in range(1, 8))  # 7 passos
             
             if not has_config and not self.recording:
                 # Primeiro uso - precisa gravar as posições
@@ -729,14 +839,17 @@ class MainWindow(QMainWindow):
                     self.worker = NFeDownloader(
                         nfe_keys=self.nfe_keys,
                         settings=self.settings,
-                        mode='record'
+                        mode='record',
+                        speed=self.speed
                     )
+                    self.worker.download_folder = self.download_folder  # Passa a pasta de download
                     self.worker.signals.message.connect(self.update_status)
                     self.worker.signals.capture_step.connect(self.update_instruction)
                     self.worker.signals.browser_ready.connect(self.on_browser_ready)
                     self.worker.signals.finished.connect(self.on_worker_finished)
                     self.worker.signals.error.connect(self.show_error)
                     self.worker.signals.click_recorded.connect(self.on_click_recorded)
+                    self.overlay.show()
                     self.worker.start()
                 return
             
@@ -750,8 +863,10 @@ class MainWindow(QMainWindow):
                 self.worker = NFeDownloader(
                     nfe_keys=self.nfe_keys,
                     settings=self.settings,
-                    mode='auto'
+                    mode='auto',
+                    speed=self.speed
                 )
+                self.worker.download_folder = self.download_folder  # Passa a pasta de download
                 self.worker.signals.message.connect(self.update_status)
                 self.worker.signals.progress.connect(self.update_progress)
                 self.worker.signals.finished.connect(self.on_worker_finished)
@@ -805,6 +920,7 @@ class MainWindow(QMainWindow):
     def update_automation_status(self, current, status):
         self.current_nfe = current
         self.automation_status.setText(status)
+        self.update_overlay(current, self.total_nfes, status)
     
     def on_click_recorded(self, step, x, y):
         """Quando um clique é registrado durante a gravação"""
@@ -821,6 +937,7 @@ class MainWindow(QMainWindow):
         self.btn_download.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.click_timer.stop()
+        self.overlay.hide()
         
         if self.progress_bar.value() == 100:
             self.status_label.setText("Operação concluída com sucesso!")
@@ -837,6 +954,97 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Erro", error)
         self.on_worker_finished()
 
+class OverlayWindow(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setStyleSheet("background: transparent;")
+        
+        # Layout principal
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Widget de conteúdo
+        self.content = QWidget()
+        self.content.setStyleSheet("""
+            background-color: rgba(255, 255, 255, 220);
+            border-radius: 8px;
+            border: 1px solid #ddd;
+        """)
+        
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Título
+        self.title_label = QLabel("Progresso HBM XML")
+        self.title_label.setStyleSheet("""
+            font-weight: bold;
+            font-size: 12px;
+            color: #2c3e50;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #eee;
+        """)
+        content_layout.addWidget(self.title_label)
+        
+        # Status
+        self.status_label = QLabel("Pronto para começar")
+        self.status_label.setStyleSheet("font-size: 11px; color: #666;")
+        self.status_label.setWordWrap(True)
+        content_layout.addWidget(self.status_label)
+        
+        # Progresso
+        self.progress_label = QLabel("0/0 NFe processadas")
+        self.progress_label.setStyleSheet("font-size: 11px; color: #4682B4;")
+        content_layout.addWidget(self.progress_label)
+        
+        # Tempo estimado
+        self.time_label = QLabel("Tempo estimado: --")
+        self.time_label.setStyleSheet("font-size: 10px; color: #7f8c8d; font-style: italic;")
+        content_layout.addWidget(self.time_label)
+        
+        self.content.setLayout(content_layout)
+        layout.addWidget(self.content)
+        self.setLayout(layout)
+        
+        # Variáveis para cálculo de tempo
+        self.start_time = None
+        self.last_update = None
+        
+    def update_progress(self, current, total, status):
+        """Atualiza o overlay com o progresso atual"""
+        if self.start_time is None:
+            self.start_time = time.time()
+        
+        self.progress_label.setText(f"{current}/{total} NFe processadas")
+        self.status_label.setText(status)
+        
+        # Calcula tempo estimado
+        if current > 0:
+            elapsed = time.time() - self.start_time
+            remaining = (elapsed / current) * (total - current)
+            self.time_label.setText(f"Tempo estimado: {self.format_time(remaining)}")
+        
+        # Ajusta posição para canto superior direito
+        screen_geometry = QApplication.desktop().availableGeometry()
+        self.move(screen_geometry.right() - self.width() - 20, 20)
+        
+    def format_time(self, seconds):
+        """Formata segundos em minutos:segundos"""
+        minutes = int(seconds // 60)
+        seconds = int(seconds % 60)
+        return f"{minutes:02d}:{seconds:02d}"
+    
+    def showEvent(self, event):
+        """Ajusta a posição quando mostrado"""
+        self.adjust_position()
+        super().showEvent(event)
+    
+    def adjust_position(self):
+        """Ajusta a posição para o canto superior direito"""
+        screen_geometry = QApplication.desktop().availableGeometry()
+        self.move(screen_geometry.right() - self.width() - 20, 20)
+
 class LogHandler(logging.Handler):
     """Handler personalizado para enviar logs para o QTextEdit"""
     def __init__(self, text_edit):
@@ -848,6 +1056,10 @@ class LogHandler(logging.Handler):
         self.text_edit.append(msg)
         # Auto-scroll
         self.text_edit.verticalScrollBar().setValue(self.text_edit.verticalScrollBar().maximum())
+
+    def closeEvent(self, event):
+        self.overlay.close()
+        super().closeEvent(event)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
