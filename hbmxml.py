@@ -1385,16 +1385,26 @@ class MainWindow(QMainWindow):
             
             # Armazena nome da planilha atual
             self.current_spreadsheet_name = os.path.splitext(file_name)[0]
+            # Armazena a lista de NFes desta planilha para mover apenas esses XMLs depois
+            self.current_batch_nfes = list(self.nfe_keys)
+            # Cria nome de pasta de saída com timestamp (sem espaços)
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            safe_name = ''.join(c for c in self.current_spreadsheet_name if c.isalnum() or c in (' ', '_', '-')).strip()
+            self.current_spreadsheet_output = f"{safe_name}_{ts}"
             
             self.status_label.setText(f"📊 Planilha {index+1}/{len(self.batch_spreadsheets)}: {len(self.nfe_keys)} NFes carregadas")
-            
-            QMessageBox.information(self, "Planilha Carregada", 
-                                  f"📊 Planilha {index+1} de {len(self.batch_spreadsheets)}\n\n"
-                                  f"Arquivo: {file_name}\n"
-                                  f"NFes encontradas: {len(self.nfe_keys)}\n\n"
-                                  f"Clique em 'Baixar XMLs' para processar esta planilha.")
-            
             logger.info(f"✅ Carregadas {len(self.nfe_keys)} NFes da planilha {file_name}")
+            # Inicia automaticamente o download para esta planilha (modo lote)
+            auto_captcha = False
+            if HCAPTCHA_AVAILABLE and hasattr(self, 'auto_captcha_checkbox'):
+                auto_captcha = self.auto_captcha_checkbox.isChecked()
+            use_selenium = False
+            if SELENIUM_AVAILABLE and hasattr(self, 'use_selenium_checkbox'):
+                use_selenium = self.use_selenium_checkbox.isChecked()
+            # Desativa botões e inicia worker
+            self.btn_download.setEnabled(False)
+            self.btn_stop.setEnabled(True)
+            self.create_and_start_worker(auto_captcha=auto_captcha, use_selenium=use_selenium)
             
         except Exception as e:
             error_msg = f"Erro ao carregar planilha do lote: {str(e)}"
@@ -1406,27 +1416,14 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'batch_spreadsheets') or not self.batch_spreadsheets:
             return
         
+        # Avança índice e carrega automaticamente sem confirmação
         self.current_batch_index += 1
-        
         if self.current_batch_index < len(self.batch_spreadsheets):
-            # Ainda tem planilhas para processar
-            reply = QMessageBox.question(self, "Próxima Planilha", 
-                                        f"✅ Planilha {self.current_batch_index} concluída!\n\n"
-                                        f"Deseja carregar a próxima planilha?\n"
-                                        f"({self.current_batch_index + 1}/{len(self.batch_spreadsheets)})",
-                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            
-            if reply == QMessageBox.Yes:
-                self.load_spreadsheet_from_batch(self.current_batch_index)
-            else:
-                logger.info("Processamento em lote cancelado pelo usuário")
-                self.batch_spreadsheets = None
+            logger.info(f"➡️ Carregando próxima planilha ({self.current_batch_index+1}/{len(self.batch_spreadsheets)})")
+            self.load_spreadsheet_from_batch(self.current_batch_index)
         else:
-            # Todas as planilhas foram processadas
-            QMessageBox.information(self, "Lote Concluído", 
-                                  f"🎉 Todas as {len(self.batch_spreadsheets)} planilhas foram processadas!\n\n"
-                                  f"Processo em lote finalizado.")
             logger.info(f"✅ Lote de {len(self.batch_spreadsheets)} planilhas concluído")
+            QMessageBox.information(self, "Lote Concluído", f"🎉 Todas as {len(self.batch_spreadsheets)} planilhas foram processadas!")
             self.batch_spreadsheets = None
     
     def export_spreadsheet(self):
@@ -1754,22 +1751,8 @@ class MainWindow(QMainWindow):
                 if SELENIUM_AVAILABLE and hasattr(self, 'use_selenium_checkbox'):
                     use_selenium = self.use_selenium_checkbox.isChecked()
                 
-                self.worker = NFeDownloader(
-                    nfe_keys=self.nfe_keys,
-                    settings=self.settings,
-                    mode='auto',
-                    speed=self.speed,
-                    auto_captcha=auto_captcha,
-                    use_selenium=use_selenium
-                )
-                self.worker.signals.message.connect(self.update_status)
-                self.worker.signals.progress.connect(self.update_progress)
-                self.worker.signals.finished.connect(self.on_worker_finished)
-                self.worker.signals.error.connect(self.show_error)
-                self.worker.signals.automation_progress.connect(self.update_automation_status)
-                self.worker.signals.top_progress.connect(self.update_top_progress)
-                self.worker.signals.xml_not_found.connect(self.on_xml_not_found)
-                self.worker.start()
+                # Cria e inicia o worker (helper) - permite reuse para modo lote
+                self.create_and_start_worker(auto_captcha=auto_captcha, use_selenium=use_selenium)
             else:
                 QMessageBox.warning(self, "Aviso", "Adicione pelo menos uma NFe para processar!")
                 logger.warning("Tentativa de iniciar sem NFe adicionadas")
@@ -1787,6 +1770,30 @@ class MainWindow(QMainWindow):
             self.btn_download.setEnabled(True)
             self.click_timer.stop()
             logger.info("Operação interrompida pelo usuário")
+
+        def create_and_start_worker(self, auto_captcha=False, use_selenium=False):
+            """Cria o NFeDownloader e inicia o worker. Usado por start_download e processamento em lote."""
+            try:
+                self.worker = NFeDownloader(
+                    nfe_keys=list(self.nfe_keys),
+                    settings=self.settings,
+                    mode='auto',
+                    speed=self.speed,
+                    auto_captcha=auto_captcha,
+                    use_selenium=use_selenium
+                )
+                self.worker.signals.message.connect(self.update_status)
+                self.worker.signals.progress.connect(self.update_progress)
+                self.worker.signals.finished.connect(self.on_worker_finished)
+                self.worker.signals.error.connect(self.show_error)
+                self.worker.signals.automation_progress.connect(self.update_automation_status)
+                self.worker.signals.top_progress.connect(self.update_top_progress)
+                self.worker.signals.xml_not_found.connect(self.on_xml_not_found)
+                self.worker.start()
+                logger.info("Worker iniciado para processamento de NFe(s)")
+            except Exception as e:
+                logger.error(f"Erro ao iniciar worker: {e}")
+                self.show_error(f"Erro ao iniciar worker: {e}")
     
     def on_xml_not_found(self, nfe_key):
         """Chamado quando um XML não é encontrado"""
@@ -1869,42 +1876,39 @@ class MainWindow(QMainWindow):
         try:
             if not hasattr(self, 'current_spreadsheet_name'):
                 return
-            
-            # Cria pasta com nome da planilha
             base_folder = get_executable_dir()
-            spreadsheet_folder = os.path.join(base_folder, f"XMLs_{self.current_spreadsheet_name}")
-            
+            # Pasta com timestamp já gerada em load_spreadsheet_from_batch
+            output_folder_name = getattr(self, 'current_spreadsheet_output', None)
+            if not output_folder_name:
+                output_folder_name = f"XMLs_{self.current_spreadsheet_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+            spreadsheet_folder = os.path.join(base_folder, output_folder_name)
             if not os.path.exists(spreadsheet_folder):
                 os.makedirs(spreadsheet_folder)
                 logger.info(f"📁 Pasta criada: {spreadsheet_folder}")
-            
-            # Move todos os XMLs da pasta "XML Concluidos" para a pasta da planilha
+
+            # Move apenas os XMLs correspondentes às NFes desta planilha
             xml_concluidos = os.path.join(base_folder, "XML Concluidos")
             moved_count = 0
-            
-            if os.path.exists(xml_concluidos):
-                for filename in os.listdir(xml_concluidos):
-                    if filename.endswith('.xml'):
-                        src = os.path.join(xml_concluidos, filename)
+            if os.path.exists(xml_concluidos) and hasattr(self, 'current_batch_nfes'):
+                for nfe_key in self.current_batch_nfes:
+                    filename = f"{nfe_key}.xml"
+                    src = os.path.join(xml_concluidos, filename)
+                    if os.path.exists(src):
                         dst = os.path.join(spreadsheet_folder, filename)
-                        
                         try:
-                            # Move o arquivo
                             import shutil
                             shutil.move(src, dst)
                             moved_count += 1
                         except Exception as e:
                             logger.error(f"Erro ao mover {filename}: {e}")
-            
+
             logger.info(f"✅ {moved_count} XMLs movidos para {spreadsheet_folder}")
-            
-            # Mostra resumo e pergunta sobre próxima planilha
-            QMessageBox.information(self, "Planilha Concluída", 
-                                  f"✅ Planilha processada com sucesso!\n\n"
-                                  f"📁 {moved_count} XMLs movidos para:\n{spreadsheet_folder}\n\n"
-                                  f"Preparando próxima planilha...")
-            
-            # Processa próxima planilha
+
+            # Log resumido (não bloqueante)
+            self.status_label.setText(f"✅ Planilha '{self.current_spreadsheet_name}' concluída - {moved_count} XMLs movidos")
+
+            # Avança automaticamente para a próxima planilha (sem confirmação)
             self.process_next_batch_spreadsheet()
             
         except Exception as e:
