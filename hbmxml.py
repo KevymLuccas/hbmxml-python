@@ -160,82 +160,28 @@ class NFeDownloader(Thread):
         
         logger.info(f"NFe registrada no log de não encontrados: {nfe_key}")
     
-    def try_solve_captcha_selenium(self):
-        """Tenta resolver o captcha usando Selenium + hCaptcha-solver"""
-        if not self.use_selenium or not self.auto_captcha or not HCAPTCHA_AVAILABLE or not SELENIUM_AVAILABLE:
-            return False
+    def remove_from_missing_log(self, nfe_key):
+        """Remove a chave da NFe do log de XMLs não encontrados se ela estiver lá"""
+        log_file = os.path.join(get_executable_dir(), "XMLs_Nao_Encontrados.txt")
+        
+        if not os.path.exists(log_file):
+            return  # Arquivo não existe, não há nada para remover
         
         try:
-            logger.info("🤖 Tentando resolver hCaptcha com Selenium...")
-            self.signals.message.emit("🤖 Resolvendo hCaptcha automaticamente...")
+            # Lê todas as linhas do arquivo
+            with open(log_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
             
-            # Aguarda o captcha aparecer
-            time.sleep(3)
+            # Filtra as linhas que NÃO contém a chave atual
+            updated_lines = [line for line in lines if nfe_key not in line]
             
-            # Usa o hcaptcha-solver com o driver do Selenium
-            solver = HCaptchaSolver()
-            
-            # O solver precisa do iframe do hCaptcha
-            # Tenta localizar e resolver
-            try:
-                # Procura pelo iframe do hCaptcha
-                WebDriverWait(self.driver, 10).until(
-                    EC.frame_to_be_available_and_switch_to_it((By.CSS_SELECTOR, "iframe[src*='hcaptcha']"))
-                )
-                
-                logger.info("✅ hCaptcha iframe encontrado, tentando resolver...")
-                
-                # Volta para o contexto principal
-                self.driver.switch_to.default_content()
-                
-                # Aguarda um pouco para o solver processar
-                time.sleep(5)
-                
-                logger.info("✅ Captcha potencialmente resolvido!")
-                return True
-                
-            except Exception as iframe_error:
-                logger.warning(f"⚠️ Não foi possível localizar iframe do hCaptcha: {str(iframe_error)}")
-                return False
-            
+            # Se removeu alguma linha, reescreve o arquivo
+            if len(updated_lines) < len(lines):
+                with open(log_file, 'w', encoding='utf-8') as f:
+                    f.writelines(updated_lines)
+                logger.info(f"✅ NFe {nfe_key[:10]}... removida do log de XMLs não encontrados")
         except Exception as e:
-            logger.warning(f"❌ Erro ao resolver captcha com Selenium: {str(e)}")
-            return False
-    
-    def try_solve_captcha(self):
-        """Tenta resolver o captcha automaticamente usando hcaptcha-solver"""
-        # Se estiver usando Selenium, tenta o método específico
-        if self.use_selenium:
-            return self.try_solve_captcha_selenium()
-        
-        # Método original (PyAutoGUI - não funciona)
-        if not self.auto_captcha or not HCAPTCHA_AVAILABLE:
-            logger.info("Solver automático desativado ou não disponível, aguardando resolução manual")
-            return False
-        
-        try:
-            logger.info("🤖 Tentando resolver hCaptcha automaticamente...")
-            self.signals.message.emit("🤖 Resolvendo hCaptcha automaticamente...")
-            
-            # Aguarda o captcha carregar completamente
-            time.sleep(3)
-            
-            # Tenta usar o solver do hCaptcha
-            # O solver precisa ter acesso ao navegador para funcionar
-            # Como estamos usando pyautogui (sem controle do navegador),
-            # o solver não conseguirá acessar o iframe do captcha
-            
-            logger.warning("⚠️ hcaptcha-solver requer controle do navegador via Selenium")
-            logger.info("💡 Sugestão: Ative 'Usar Selenium' nas configurações")
-            logger.info("⏳ Aguardando resolução manual do captcha (30 segundos)...")
-            
-            return False
-            
-        except Exception as e:
-            logger.warning(f"❌ Não foi possível resolver o captcha automaticamente: {str(e)}")
-            logger.info("⏳ Aguardando resolução manual do captcha")
-            return False
-            return False
+            logger.warning(f"⚠️ Erro ao remover NFe do log de não encontrados: {str(e)}")
 
     def record_positions(self):
         """Grava as posições dos cliques para automação posterior"""
@@ -343,24 +289,16 @@ class NFeDownloader(Thread):
                     time.sleep(self.wait_times['step_wait'])
                     logger.debug(f"Chave {nfe_key} inserida")
                     
-                    # Passo 2: Clica no campo do captcha e tenta resolver automaticamente
-                    self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Processando captcha...")
+                    # Passo 2: Clica no campo do captcha
+                    # ⚠️ CAPTCHA DEVE SER RESOLVIDO MANUALMENTE OU POR MEIOS EXTERNOS
+                    self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Aguardando resolução do captcha...")
                     pyautogui.click(positions[2][0], positions[2][1])
                     time.sleep(1)  # Aguarda um segundo para o captcha carregar
                     
-                    # Tenta resolver o captcha automaticamente
-                    captcha_solved = self.try_solve_captcha()
-                    
-                    if not captcha_solved:
-                        # Se não conseguiu resolver automaticamente, aguarda tempo para resolução manual
-                        self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Aguarde esperando captcha...")
-                        time.sleep(self.wait_times['captcha'])  # 30 segundos para resolver manualmente
-                        logger.debug("Aguardando resolução manual do captcha")
-                    else:
-                        # Se resolveu automaticamente, aguarda um pouco menos
-                        self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Captcha resolvido!")
-                        time.sleep(3)
-                        logger.debug("Captcha resolvido automaticamente")
+                    # Aguarda tempo para resolução manual ou externa do captcha
+                    logger.info("⏳ Aguardando resolução do captcha (manual ou externa)...")
+                    time.sleep(self.wait_times['captcha'])  # Tempo configurável para resolver o captcha
+                    logger.debug("Captcha deve ter sido resolvido, continuando...")
                     
                     # Passo 3: Clica em Continuar
                     self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Continuando...")
@@ -400,14 +338,11 @@ class NFeDownloader(Thread):
                         pyautogui.write(nfe_key)  # Escreve direto sem Ctrl+A
                         time.sleep(self.wait_times['step_wait'])
                         
-                        # Passo 2: Captcha
+                        # Passo 2: Captcha (DEVE SER RESOLVIDO MANUALMENTE OU POR MEIOS EXTERNOS)
                         pyautogui.click(positions[2][0], positions[2][1])
                         time.sleep(1)
-                        captcha_solved = self.try_solve_captcha()
-                        if not captcha_solved:
-                            time.sleep(self.wait_times['captcha'])
-                        else:
-                            time.sleep(3)
+                        logger.info("⏳ Aguardando resolução do captcha (manual ou externa)...")
+                        time.sleep(self.wait_times['captcha'])  # Tempo para resolver captcha
                         
                         # Passo 3: Continuar
                         pyautogui.click(positions[3][0], positions[3][1])
@@ -425,9 +360,14 @@ class NFeDownloader(Thread):
                         xml_found = self.check_xml_exists(nfe_key)
                         if xml_found:
                             logger.info(f"✅ XML encontrado na 2ª tentativa!")
+                            # Remove do log de não encontrados se estiver lá
+                            self.remove_from_missing_log(nfe_key)
                     
                     if xml_found:
                         logger.info(f"✅ XML da NFe {nfe_key[:10]} baixado com sucesso")
+                        
+                        # Remove do log de não encontrados se estiver lá
+                        self.remove_from_missing_log(nfe_key)
                         
                         # Passo 6: Clica em Nova Consulta
                         self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Preparando próxima...")
@@ -556,19 +496,11 @@ class NFeDownloader(Thread):
                     time.sleep(self.wait_times['step_wait'])
                     logger.info(f"✅ Chave {nfe_key} inserida com sucesso")
                     
-                    # Passo 2: Aguarda e resolve o captcha
-                    self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Processando captcha...")
-                    
-                    # Tenta resolver captcha automaticamente se habilitado
-                    captcha_solved = False
-                    if self.auto_captcha:
-                        captcha_solved = self.try_solve_captcha_selenium()
-                    
-                    if not captcha_solved:
-                        # Aguarda resolução manual
-                        self.signals.automation_progress.emit(i+1, f"NFe {i+1}: 👤 Resolva o captcha manualmente...")
-                        logger.info(f"⏳ Aguardando resolução manual do captcha ({self.wait_times['captcha']}s)...")
-                        time.sleep(self.wait_times['captcha'])
+                    # Passo 2: Aguarda resolução do captcha
+                    # ⚠️ CAPTCHA DEVE SER RESOLVIDO MANUALMENTE OU POR MEIOS EXTERNOS
+                    self.signals.automation_progress.emit(i+1, f"NFe {i+1}: 👤 Aguardando resolução do captcha...")
+                    logger.info(f"⏳ Aguardando resolução do captcha (manual ou externa) - {self.wait_times['captcha']}s...")
+                    time.sleep(self.wait_times['captcha'])
                     
                     # Passo 3: Clica em Continuar
                     self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Procurando botão Continuar...")
@@ -602,6 +534,9 @@ class NFeDownloader(Thread):
                     self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Verificando download...")
                     if self.check_xml_exists(nfe_key):
                         logger.info(f"XML da NFe {nfe_key[:10]} baixado com sucesso")
+                        
+                        # Remove do log de não encontrados se estiver lá
+                        self.remove_from_missing_log(nfe_key)
                         
                         # Clica em Nova Consulta
                         self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Preparando próxima...")
