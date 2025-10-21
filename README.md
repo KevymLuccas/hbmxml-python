@@ -5,9 +5,12 @@
 ## ⚙️ Funcionalidades
 
 * Interface intuitiva com PyQt5
+* **Processamento em lote de múltiplas planilhas Excel**
 * Importação e exportação de chaves de NFe via Excel
 * Gravação de posições dos cliques para automação
-* Download automático dos XMLs após preenchimento do captcha
+* Download automático dos XMLs (**captcha deve ser resolvido manualmente ou por meios externos**)
+* **Sistema de retry automático (2 tentativas por NFe)**
+* **Tela de bloqueio durante o processo (F11 para emergência)**
 * Log detalhado da execução
 
 ---
