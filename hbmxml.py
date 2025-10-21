@@ -1,3 +1,8 @@
+"""
+HBM XML Downloader - Automatiza o download de XMLs de NFe do site da Fazenda
+Feito pelo Kevym Luccas
+"""
+
 import os
 import sys
 import time
@@ -118,12 +123,6 @@ class NFeDownloader(Thread):
             5: "Clique no OK do popup de download concluído",
             6: "Clique no botão Nova Consulta",
             7: "Clique no botão para Recarregar/Atualizar a página (F5 ou botão reload)"
-        }
-        
-        # Passos extras para nota cancelada (opcional)
-        self.canceled_steps = {
-            7: "Clique no OK do popup de NOTA CANCELADA",
-            8: "Clique no botão para Recarregar/Atualizar a página (F5 ou botão reload)"
         }
 
     def calculate_wait_times(self):
@@ -311,27 +310,6 @@ class NFeDownloader(Thread):
                 positions[step] = (int(x), int(y))
                 logger.debug(f"Posição {step} carregada: {positions[step]}")
             
-            # Verifica se tem configuração de nota cancelada (passos 7 e 8 extras)
-            has_canceled_config = (
-                self.settings.value("step_canceled_7_x") is not None and
-                self.settings.value("step_canceled_7_y") is not None and
-                self.settings.value("step_canceled_8_x") is not None and
-                self.settings.value("step_canceled_8_y") is not None
-            )
-            
-            if has_canceled_config:
-                positions['canceled_7'] = (
-                    int(self.settings.value("step_canceled_7_x")),
-                    int(self.settings.value("step_canceled_7_y"))
-                )
-                positions['canceled_8'] = (
-                    int(self.settings.value("step_canceled_8_x")),
-                    int(self.settings.value("step_canceled_8_y"))
-                )
-                logger.info("✅ Configuração de nota cancelada encontrada e carregada")
-            else:
-                logger.info("ℹ️ Sem configuração de nota cancelada - usará apenas recarregar página")
-            
             # Usa a pasta XML Concluidos (já definida no __init__)
             logger.info(f"Pasta de destino dos XMLs: {self.xml_folder}")
             
@@ -404,8 +382,52 @@ class NFeDownloader(Thread):
                     
                     # Verifica se o XML foi baixado
                     self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Verificando download...")
-                    if self.check_xml_exists(nfe_key):
-                        logger.info(f"XML da NFe {nfe_key[:10]} baixado com sucesso")
+                    xml_found = self.check_xml_exists(nfe_key)
+                    
+                    # Se não encontrou, tenta mais 1 vez (total 2 tentativas)
+                    if not xml_found:
+                        logger.warning(f"⚠️ XML não encontrado - Tentando novamente (2/2) para NFe {nfe_key[:10]}...")
+                        self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Tentativa 2/2 - Abrindo nova guia do navegador...")
+                        
+                        # Abre nova guia do navegador (igual quando clica em "Baixar XMLs")
+                        webbrowser.open("https://www.nfe.fazenda.gov.br/portal/consultaRecaptcha.aspx?tipoConsulta=resumo&tipoConteudo=7PhJ+gAVw2g=")
+                        time.sleep(self.wait_times['browser_open'])
+                        
+                        # REFAZ TODO O PROCESSO na nova guia
+                        # Passo 1: Insere a mesma chave que não deu certo (SEM Ctrl+A)
+                        pyautogui.click(positions[1][0], positions[1][1])
+                        time.sleep(self.wait_times['step_wait'])
+                        pyautogui.write(nfe_key)  # Escreve direto sem Ctrl+A
+                        time.sleep(self.wait_times['step_wait'])
+                        
+                        # Passo 2: Captcha
+                        pyautogui.click(positions[2][0], positions[2][1])
+                        time.sleep(1)
+                        captcha_solved = self.try_solve_captcha()
+                        if not captcha_solved:
+                            time.sleep(self.wait_times['captcha'])
+                        else:
+                            time.sleep(3)
+                        
+                        # Passo 3: Continuar
+                        pyautogui.click(positions[3][0], positions[3][1])
+                        time.sleep(self.wait_times['continue'])
+                        
+                        # Passo 4: Download
+                        pyautogui.click(positions[4][0], positions[4][1])
+                        time.sleep(self.wait_times['download'])
+                        
+                        # Passo 5: OK popup
+                        pyautogui.click(positions[5][0], positions[5][1])
+                        time.sleep(self.wait_times['popup'])
+                        
+                        # Verifica novamente
+                        xml_found = self.check_xml_exists(nfe_key)
+                        if xml_found:
+                            logger.info(f"✅ XML encontrado na 2ª tentativa!")
+                    
+                    if xml_found:
+                        logger.info(f"✅ XML da NFe {nfe_key[:10]} baixado com sucesso")
                         
                         # Passo 6: Clica em Nova Consulta
                         self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Preparando próxima...")
@@ -416,31 +438,16 @@ class NFeDownloader(Thread):
                         # Aguarda um pouco antes da próxima NFe
                         time.sleep(self.wait_times['between_nfe'])
                     else:
-                        # XML não encontrado - Nota provavelmente cancelada
-                        logger.warning(f"⚠️ XML não encontrado para NFe {nfe_key} - Nota pode estar CANCELADA")
+                        # XML não encontrado após 2 tentativas - abre nova guia
+                        logger.error(f"❌ XML não encontrado após 2 tentativas para NFe {nfe_key}")
                         self.log_missing_xml(nfe_key)
                         self.signals.xml_not_found.emit(nfe_key)
                         
-                        # Se tem configuração de nota cancelada, usa ela
-                        if has_canceled_config:
-                            self.signals.automation_progress.emit(i+1, f"NFe {i+1}: NOTA CANCELADA - fechando popup...")
-                            
-                            # Passo extra 7: Clica no OK do popup de NOTA CANCELADA
-                            pyautogui.click(positions['canceled_7'][0], positions['canceled_7'][1])
-                            time.sleep(self.wait_times['popup'])
-                            logger.info("Popup de nota cancelada fechado")
-                            
-                            # Passo extra 8: Clica no botão de recarregar página
-                            self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Reiniciando página...")
-                            pyautogui.click(positions['canceled_8'][0], positions['canceled_8'][1])
-                            time.sleep(self.wait_times['browser_open'])
-                            logger.info("Página reiniciada automaticamente, continuando com próxima NFe")
-                        else:
-                            # Sem configuração de nota cancelada - apenas recarrega a página
-                            self.signals.automation_progress.emit(i+1, f"NFe {i+1}: Reiniciando página...")
-                            pyautogui.click(positions[7][0], positions[7][1])  # Usa passo 7 normal (recarregar)
-                            time.sleep(self.wait_times['browser_open'])
-                            logger.info("Página reiniciada automaticamente (sem configuração de nota cancelada)")
+                        # Abre nova guia do navegador (igual ao início)
+                        self.signals.automation_progress.emit(i+1, f"NFe {i+1}: XML não encontrado - abrindo nova guia...")
+                        webbrowser.open("https://www.nfe.fazenda.gov.br/portal/consultaRecaptcha.aspx?tipoConsulta=resumo&tipoConteudo=7PhJ+gAVw2g=")
+                        time.sleep(self.wait_times['browser_open'])
+                        logger.info("Nova guia aberta no navegador, continuando com próxima NFe")
                     
                     self.signals.progress.emit(int((i+1)/total * 100))
                     
@@ -708,6 +715,56 @@ class NFeDownloader(Thread):
                     pass
             self.signals.finished.emit()
 
+class BlockingOverlay(QWidget):
+    """Overlay invisível fullscreen que bloqueia interação durante processamento em lote"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Janela transparente que fica em cima de tudo
+        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Totalmente transparente - você vê tudo, mas não consegue clicar
+        self.setStyleSheet("background-color: rgba(0, 0, 0, 0);")
+    
+    def update_status(self, text):
+        """Método vazio - não mostra nada, só bloqueia"""
+        pass
+    
+    def showEvent(self, event):
+        """Quando mostrar, expande para fullscreen invisível"""
+        super().showEvent(event)
+        screen = QApplication.desktop().screenGeometry()
+        self.setGeometry(screen)
+    
+    def keyPressEvent(self, event):
+        """Captura F11 para fechar o aplicativo, bloqueia todo o resto"""
+        if event.key() == Qt.Key_F11:
+            logger.warning("🚨 F11 pressionado - FECHAMENTO EMERGENCIAL")
+            QApplication.quit()
+        else:
+            # Bloqueia todas as outras teclas
+            event.ignore()
+    
+    def mousePressEvent(self, event):
+        """Bloqueia cliques do mouse - não faz nada"""
+        event.ignore()
+    
+    def mouseReleaseEvent(self, event):
+        """Bloqueia release do mouse"""
+        event.ignore()
+    
+    def mouseDoubleClickEvent(self, event):
+        """Bloqueia double click"""
+        event.ignore()
+    
+    def mouseMoveEvent(self, event):
+        """Bloqueia movimento do mouse"""
+        event.ignore()
+    
+    def wheelEvent(self, event):
+        """Bloqueia scroll do mouse"""
+        event.ignore()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -738,6 +795,9 @@ class MainWindow(QMainWindow):
         self.speed = int(self.settings.value("speed", 3))  # Valor padrão 3 (médio)
         self.overlay = OverlayWindow()
         self.overlay.resize(250, 120)  # Tamanho inicial
+        
+        # Overlay de bloqueio para processamento em lote
+        self.blocking_overlay = BlockingOverlay(self)
         
         # Layout principal
         self.init_ui()
@@ -1036,20 +1096,6 @@ class MainWindow(QMainWindow):
         
         config_group.setLayout(config_layout)
         body_layout.addWidget(config_group)
-        
-        # Botão separado para configurar nota cancelada
-        btn_canceled_layout = QHBoxLayout()
-        btn_canceled_layout.addStretch()
-        
-        self.btn_config_canceled = QPushButton("⚙️ Configurar Nota Cancelada (Opcional)")
-        self.btn_config_canceled.setMaximumHeight(35)
-        self.btn_config_canceled.setStyleSheet("font-size: 11px; padding: 8px; background-color: #f39c12; color: white;")
-        self.btn_config_canceled.clicked.connect(self.config_canceled_note)
-        self.btn_config_canceled.setToolTip("Configure os passos extras para quando uma nota estiver cancelada.\nSó aparecerá quando o XML não for encontrado.")
-        btn_canceled_layout.addWidget(self.btn_config_canceled)
-        btn_canceled_layout.addStretch()
-        
-        body_layout.addLayout(btn_canceled_layout)
     
     def setup_nfe_section(self, body_layout):
         nfe_group = QGroupBox("Adicionar NFe")
@@ -1085,7 +1131,7 @@ class MainWindow(QMainWindow):
         # Lista de NFe
         self.nfe_list = QListWidget()
         self.nfe_list.setMaximumHeight(120)
-        nfe_layout.addWidget(QLabel("NFe para processar (Limite: 500):"))
+        nfe_layout.addWidget(QLabel("NFe para processar (Sem limite):"))
         nfe_layout.addWidget(self.nfe_list)
         
         nfe_group.setLayout(nfe_layout)
@@ -1208,16 +1254,9 @@ class MainWindow(QMainWindow):
     def update_config_status(self):
         """Atualiza o status da configuração na interface"""
         has_config = all(self.settings.value(f"step_{i}_x") is not None for i in range(1, 8))  # 7 passos principais
-        has_canceled = (
-            self.settings.value("step_canceled_7_x") is not None and
-            self.settings.value("step_canceled_8_x") is not None
-        )
         
         if has_config:
-            status_text = "✔ Configurações de automação prontas"
-            if has_canceled:
-                status_text += " (+ Nota Cancelada)"
-            self.config_status.setText(status_text)
+            self.config_status.setText("✔ Configurações de automação prontas")
             self.config_status.setStyleSheet("color: #27ae60; font-weight: bold;")
         else:
             self.config_status.setText("⚠ Primeiro uso requer configuração")
@@ -1241,15 +1280,11 @@ class MainWindow(QMainWindow):
     def add_nfe(self):
         key = self.key_input.text().strip()
         if key and len(key) == 44 and key.isdigit():
-            if len(self.nfe_keys) >= 500:
-                QMessageBox.warning(self, "Limite atingido", "O limite de 500 NFe foi atingido!")
-                return
-                
             if key not in self.nfe_keys:
                 self.nfe_keys.append(key)
                 self.nfe_list.addItem(key)
                 self.key_input.clear()
-                self.status_label.setText(f"NFe adicionada. Total: {len(self.nfe_keys)}/500")
+                self.status_label.setText(f"NFe adicionada. Total: {len(self.nfe_keys)}")
                 logger.info(f"NFe adicionada: {key[:10]}...")
             else:
                 QMessageBox.warning(self, "Duplicado", "Esta NFe já foi adicionada!")
@@ -1314,10 +1349,6 @@ class MainWindow(QMainWindow):
                         if len(value) == 44 and value.isdigit():
                             if value not in nfe_keys and value not in self.nfe_keys:
                                 nfe_keys.append(value)
-                                if len(nfe_keys) + len(self.nfe_keys) >= 500:
-                                    break
-                    if len(nfe_keys) + len(self.nfe_keys) >= 500:
-                        break
                 
                 if not nfe_keys:
                     QMessageBox.warning(self, "Nenhuma NFe encontrada", 
@@ -1327,14 +1358,11 @@ class MainWindow(QMainWindow):
                 # Adiciona as NFe encontradas
                 added = 0
                 for key in nfe_keys:
-                    if len(self.nfe_keys) < 500:
-                        self.nfe_keys.append(key)
-                        self.nfe_list.addItem(key)
-                        added += 1
-                    else:
-                        break
+                    self.nfe_keys.append(key)
+                    self.nfe_list.addItem(key)
+                    added += 1
                 
-                self.status_label.setText(f"{added} NFe(s) importadas. Total: {len(self.nfe_keys)}/500")
+                self.status_label.setText(f"{added} NFe(s) importadas. Total: {len(self.nfe_keys)}")
                 QMessageBox.information(self, "Importação concluída", 
                                       f"Foram importadas {added} NFe(s) da planilha.")
                 logger.info(f"Importadas {added} NFe(s) da planilha {file_path}")
@@ -1379,7 +1407,7 @@ class MainWindow(QMainWindow):
                 return
             
             # Adiciona as NFes
-            for key in nfe_keys[:500]:
+            for key in nfe_keys:
                 self.nfe_keys.append(key)
                 self.nfe_list.addItem(key)
             
@@ -1394,21 +1422,32 @@ class MainWindow(QMainWindow):
             
             self.status_label.setText(f"📊 Planilha {index+1}/{len(self.batch_spreadsheets)}: {len(self.nfe_keys)} NFes carregadas")
             logger.info(f"✅ Carregadas {len(self.nfe_keys)} NFes da planilha {file_name}")
-            # Inicia automaticamente o download para esta planilha (modo lote)
-            auto_captcha = False
-            if HCAPTCHA_AVAILABLE and hasattr(self, 'auto_captcha_checkbox'):
-                auto_captcha = self.auto_captcha_checkbox.isChecked()
-            use_selenium = False
-            if SELENIUM_AVAILABLE and hasattr(self, 'use_selenium_checkbox'):
-                use_selenium = self.use_selenium_checkbox.isChecked()
-            # Desativa botões e inicia worker
-            self.btn_download.setEnabled(False)
-            self.btn_stop.setEnabled(True)
-            self.create_and_start_worker(auto_captcha=auto_captcha, use_selenium=use_selenium)
+            
+            # Se não for a primeira planilha, inicia automaticamente (fluxo já começou)
+            if self.current_batch_index > 0:
+                # Planilhas seguintes: automático
+                auto_captcha = False
+                if HCAPTCHA_AVAILABLE and hasattr(self, 'auto_captcha_checkbox'):
+                    auto_captcha = self.auto_captcha_checkbox.isChecked()
+                use_selenium = False
+                if SELENIUM_AVAILABLE and hasattr(self, 'use_selenium_checkbox'):
+                    use_selenium = self.use_selenium_checkbox.isChecked()
+                
+                self.btn_download.setEnabled(False)
+                self.btn_stop.setEnabled(True)
+                self.create_and_start_worker(auto_captcha=auto_captcha, use_selenium=use_selenium)
+            else:
+                # Primeira planilha: aguarda usuário apertar "Baixar XMLs"
+                self.btn_download.setEnabled(True)
+                self.btn_stop.setEnabled(False)
+                logger.info("⏸️ Aguardando usuário apertar 'Baixar XMLs' para iniciar batch")
             
         except Exception as e:
             error_msg = f"Erro ao carregar planilha do lote: {str(e)}"
             logger.error(error_msg)
+            # Esconde overlay em caso de erro
+            if hasattr(self, 'blocking_overlay'):
+                self.blocking_overlay.hide()
             QMessageBox.critical(self, "Erro", error_msg)
     
     def process_next_batch_spreadsheet(self):
@@ -1422,7 +1461,12 @@ class MainWindow(QMainWindow):
             logger.info(f"➡️ Carregando próxima planilha ({self.current_batch_index+1}/{len(self.batch_spreadsheets)})")
             self.load_spreadsheet_from_batch(self.current_batch_index)
         else:
+            # Lote concluído - esconde overlay e restaura janela
             logger.info(f"✅ Lote de {len(self.batch_spreadsheets)} planilhas concluído")
+            if hasattr(self, 'blocking_overlay'):
+                self.blocking_overlay.hide()
+                logger.info("🔓 Mouse/Teclado desbloqueados - Lote concluído")
+            
             QMessageBox.information(self, "Lote Concluído", f"🎉 Todas as {len(self.batch_spreadsheets)} planilhas foram processadas!")
             self.batch_spreadsheets = None
     
@@ -1484,27 +1528,20 @@ class MainWindow(QMainWindow):
                                       "Não foram encontradas chaves válidas no log!")
                 return
             
-            # Pergunta se quer limpar a lista atual
-            reply = QMessageBox.question(self, "Carregar XMLs Faltantes", 
-                                        f"Encontradas {len(missing_keys)} NFe(s) faltantes.\n\n"
-                                        f"Deseja SUBSTITUIR a lista atual por estas NFes?",
-                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            
-            if reply == QMessageBox.Yes:
-                # Limpa a lista atual
-                self.nfe_keys.clear()
-                self.nfe_list.clear()
-                
-                # Adiciona as NFe faltantes
-                for key in missing_keys[:500]:  # Limite de 500
+            # ADICIONA as NFe faltantes à lista atual (não substitui)
+            added_count = 0
+            for key in missing_keys:
+                if key not in self.nfe_keys:  # Evita duplicatas
                     self.nfe_keys.append(key)
                     self.nfe_list.addItem(key)
-                
-                self.status_label.setText(f"{len(self.nfe_keys)} NFe(s) faltantes carregadas. Pronto para tentar novamente!")
-                logger.info(f"Carregadas {len(self.nfe_keys)} NFe(s) faltantes do log")
-                QMessageBox.information(self, "Carregamento concluído", 
-                                      f"{len(self.nfe_keys)} NFe(s) faltantes carregadas!\n\n"
-                                      f"Clique em 'Baixar XMLs' para tentar novamente.")
+                    added_count += 1
+            
+            self.status_label.setText(f"{added_count} NFe(s) faltantes ADICIONADAS à lista!")
+            logger.info(f"Adicionadas {added_count} NFe(s) faltantes do log (total: {len(self.nfe_keys)})")
+            QMessageBox.information(self, "Carregamento concluído", 
+                                  f"{added_count} NFe(s) faltantes ADICIONADAS!\n\n"
+                                  f"Total na lista: {len(self.nfe_keys)}\n\n"
+                                  f"Clique em 'Baixar XMLs' para tentar novamente.")
             
         except Exception as e:
             error_msg = f"Erro ao carregar XMLs faltantes: {str(e)}"
@@ -1568,97 +1605,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Limpeza Concluída", 
                                   f"✅ Removidas {removed_count} NFe(s) que já foram baixadas.\n\n"
                                   f"📋 Restam {remaining} NFe(s) na lista para processar.")
-    
-    def config_canceled_note(self):
-        """Configura os passos extras para nota cancelada"""
-        try:
-            # Mensagem de introdução
-            reply = QMessageBox.question(self, "Configurar Nota Cancelada", 
-                                        "Esta configuração é OPCIONAL e só será usada quando um XML não for encontrado.\n\n"
-                                        "Você irá gravar 2 passos:\n"
-                                        "• Passo 1: Clicar no OK do popup de 'Nota Cancelada'\n"
-                                        "• Passo 2: Clicar no botão para recarregar a página\n\n"
-                                        "O navegador será aberto e você deve clicar nas posições quando solicitado.\n\n"
-                                        "Deseja continuar?",
-                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            
-            if reply != QMessageBox.Yes:
-                return
-            
-            # Cria um worker para gravar as posições
-            canceled_positions = {}
-            
-            # Abre o navegador
-            webbrowser.open("https://www.nfe.fazenda.gov.br/portal/consultaRecaptcha.aspx?tipoConsulta=resumo&tipoConteudo=7PhJ+gAVw2g=")
-            self.status_label.setText("🌐 Navegador aberto...")
-            time.sleep(5)  # Aguarda navegador abrir
-            
-            # Grava passo 1: OK da nota cancelada
-            self.status_label.setText("⏳ PASSO 1/2: Clique no OK do popup de 'Nota Cancelada'...")
-            self.instruction_label.setText("Clique no botão OK do popup de nota cancelada")
-            logger.info("Aguardando clique no OK da nota cancelada...")
-            
-            # Aguarda o clique do usuário
-            initial_pos = pyautogui.position()
-            while True:
-                time.sleep(0.1)
-                current_pos = pyautogui.position()
-                if current_pos != initial_pos:
-                    # Aguarda soltar o botão
-                    time.sleep(0.3)
-                    pos1 = pyautogui.position()
-                    canceled_positions[7] = pos1
-                    self.click_feedback.setText(f"✅ Posição 1 gravada: {pos1}")
-                    logger.info(f"Posição cancelada passo 7 salva: {pos1}")
-                    break
-            
-            time.sleep(1)
-            
-            # Grava passo 2: Recarregar página
-            self.status_label.setText("⏳ PASSO 2/2: Clique no botão de recarregar página...")
-            self.instruction_label.setText("Clique no botão para Recarregar/Atualizar a página (F5 ou botão reload)")
-            logger.info("Aguardando clique no botão de recarregar...")
-            
-            # Aguarda o clique do usuário
-            initial_pos = pyautogui.position()
-            while True:
-                time.sleep(0.1)
-                current_pos = pyautogui.position()
-                if current_pos != initial_pos:
-                    # Aguarda soltar o botão
-                    time.sleep(0.3)
-                    pos2 = pyautogui.position()
-                    canceled_positions[8] = pos2
-                    self.click_feedback.setText(f"✅ Posição 2 gravada: {pos2}")
-                    logger.info(f"Posição cancelada passo 8 salva: {pos2}")
-                    break
-            
-            # Salva as posições
-            self.settings.setValue("step_canceled_7_x", canceled_positions[7][0])
-            self.settings.setValue("step_canceled_7_y", canceled_positions[7][1])
-            self.settings.setValue("step_canceled_8_x", canceled_positions[8][0])
-            self.settings.setValue("step_canceled_8_y", canceled_positions[8][1])
-            
-            # Sucesso!
-            self.update_config_status()
-            self.status_label.setText("✅ Configuração de nota cancelada concluída!")
-            self.instruction_label.setText("")
-            self.click_feedback.setText("")
-            
-            QMessageBox.information(self, "Configuração Concluída!", 
-                                  "✅ Passos de nota cancelada gravados com sucesso!\n\n"
-                                  "Posições salvas:\n"
-                                  f"• Passo 1 (OK cancelada): {canceled_positions[7]}\n"
-                                  f"• Passo 2 (Recarregar): {canceled_positions[8]}\n\n"
-                                  "Agora, quando um XML não for encontrado, o sistema irá:\n"
-                                  "1. Fechar o popup de nota cancelada\n"
-                                  "2. Recarregar a página automaticamente")
-            logger.info("Configuração de nota cancelada concluída com sucesso")
-            
-        except Exception as e:
-            error_msg = f"Erro ao configurar nota cancelada: {str(e)}"
-            logger.error(error_msg)
-            QMessageBox.critical(self, "Erro", error_msg)
     
     def mousePressEvent(self, event):
         """Captura cliques quando estiver no modo de gravação"""
@@ -1751,6 +1697,11 @@ class MainWindow(QMainWindow):
                 if SELENIUM_AVAILABLE and hasattr(self, 'use_selenium_checkbox'):
                     use_selenium = self.use_selenium_checkbox.isChecked()
                 
+                # Se estiver em modo batch, ativa o overlay invisível
+                if hasattr(self, 'batch_spreadsheets') and self.batch_spreadsheets:
+                    self.blocking_overlay.show()
+                    logger.info("🔒 Mouse/Teclado bloqueados - Batch iniciado. F11 = fechar")
+                
                 # Cria e inicia o worker (helper) - permite reuse para modo lote
                 self.create_and_start_worker(auto_captcha=auto_captcha, use_selenium=use_selenium)
             else:
@@ -1770,30 +1721,36 @@ class MainWindow(QMainWindow):
             self.btn_download.setEnabled(True)
             self.click_timer.stop()
             logger.info("Operação interrompida pelo usuário")
-
-        def create_and_start_worker(self, auto_captcha=False, use_selenium=False):
-            """Cria o NFeDownloader e inicia o worker. Usado por start_download e processamento em lote."""
-            try:
-                self.worker = NFeDownloader(
-                    nfe_keys=list(self.nfe_keys),
-                    settings=self.settings,
-                    mode='auto',
-                    speed=self.speed,
-                    auto_captcha=auto_captcha,
-                    use_selenium=use_selenium
-                )
-                self.worker.signals.message.connect(self.update_status)
-                self.worker.signals.progress.connect(self.update_progress)
-                self.worker.signals.finished.connect(self.on_worker_finished)
-                self.worker.signals.error.connect(self.show_error)
-                self.worker.signals.automation_progress.connect(self.update_automation_status)
-                self.worker.signals.top_progress.connect(self.update_top_progress)
-                self.worker.signals.xml_not_found.connect(self.on_xml_not_found)
-                self.worker.start()
-                logger.info("Worker iniciado para processamento de NFe(s)")
-            except Exception as e:
-                logger.error(f"Erro ao iniciar worker: {e}")
-                self.show_error(f"Erro ao iniciar worker: {e}")
+            
+            # Esconde overlay se estiver em modo lote
+            if hasattr(self, 'blocking_overlay') and hasattr(self, 'batch_spreadsheets') and self.batch_spreadsheets:
+                self.blocking_overlay.hide()
+                logger.info("🔓 Mouse/Teclado desbloqueados - Operação interrompida")
+                self.batch_spreadsheets = None  # Cancela o lote
+    
+    def create_and_start_worker(self, auto_captcha=False, use_selenium=False):
+        """Cria o NFeDownloader e inicia o worker. Usado por start_download e processamento em lote."""
+        try:
+            self.worker = NFeDownloader(
+                nfe_keys=list(self.nfe_keys),
+                settings=self.settings,
+                mode='auto',
+                speed=self.speed,
+                auto_captcha=auto_captcha,
+                use_selenium=use_selenium
+            )
+            self.worker.signals.message.connect(self.update_status)
+            self.worker.signals.progress.connect(self.update_progress)
+            self.worker.signals.finished.connect(self.on_worker_finished)
+            self.worker.signals.error.connect(self.show_error)
+            self.worker.signals.automation_progress.connect(self.update_automation_status)
+            self.worker.signals.top_progress.connect(self.update_top_progress)
+            self.worker.signals.xml_not_found.connect(self.on_xml_not_found)
+            self.worker.start()
+            logger.info("Worker iniciado para processamento de NFe(s)")
+        except Exception as e:
+            logger.error(f"Erro ao iniciar worker: {e}")
+            self.show_error(f"Erro ao iniciar worker: {e}")
     
     def on_xml_not_found(self, nfe_key):
         """Chamado quando um XML não é encontrado"""
